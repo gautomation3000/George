@@ -1,0 +1,7 @@
+{
+  "name": "SheetSync Pro - Real-Time Team Spreadsheet",
+  "description": "Collaborative Google Sheets & Excel team sync platform with DataTables, offline support, Google Apps Script integration, real-time sync indicators, automated critical alerts, and cloud backups.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
