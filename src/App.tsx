@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { SheetRow, SyncState, CriticalAlert, BackupSnapshot, TeamMember, EquipmentCondition, SheetTabName } from './types/sheet';
+import { AuthState } from './types/auth';
 import { INITIAL_TEAM_MEMBERS } from './data/initialData';
 import { storageService } from './services/storageService';
 import { syncEngine } from './services/syncEngine';
+import { authService } from './services/authService';
 import { ConflictItem } from './services/indexedDbService';
 import { Header } from './components/Header';
 import { SheetTabBar } from './components/SheetTabBar';
@@ -14,6 +16,7 @@ import { BackupModal } from './components/BackupModal';
 import { ImportExportModal } from './components/ImportExportModal';
 import { EditRowModal } from './components/EditRowModal';
 import { ConflictModal } from './components/ConflictModal';
+import { AuthModal } from './components/AuthModal';
 import { WifiOff } from 'lucide-react';
 
 export default function App() {
@@ -38,6 +41,7 @@ export default function App() {
 
   const [rows, setRows] = useState<SheetRow[]>(() => storageService.getRows());
   const [syncState, setSyncState] = useState<SyncState>(() => syncEngine.getState());
+  const [authState, setAuthState] = useState<AuthState>(() => authService.getState());
   const [alerts, setAlerts] = useState<CriticalAlert[]>(() => storageService.getAlerts());
   const [backups, setBackups] = useState<BackupSnapshot[]>(() => storageService.getBackups());
   const [conflicts, setConflicts] = useState<ConflictItem[]>(() => storageService.getConflicts());
@@ -48,6 +52,7 @@ export default function App() {
   const [activeSheetTab, setActiveSheetTab] = useState<SheetTabName>('Full list');
   const [activeView, setActiveView] = useState<'table' | 'cards'>('table');
 
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const [appsScriptModalOpen, setAppsScriptModalOpen] = useState(false);
   const [backupModalOpen, setBackupModalOpen] = useState(false);
   const [importExportModalOpen, setImportExportModalOpen] = useState(false);
@@ -58,6 +63,10 @@ export default function App() {
   useEffect(() => {
     const unsubSync = syncEngine.subscribe((state) => {
       setSyncState(state);
+    });
+
+    const unsubAuth = authService.subscribe((state) => {
+      setAuthState(state);
     });
 
     const unsubStorage = storageService.subscribe((event, data) => {
@@ -76,9 +85,22 @@ export default function App() {
 
     return () => {
       unsubSync();
+      unsubAuth();
       unsubStorage();
     };
   }, []);
+
+  const canEdit =
+    authState.isUnlocked &&
+    (authState.role === 'developer' ||
+      authState.role === 'admin' ||
+      !!authState.currentUser?.permissions.canEditTools);
+
+  const canDelete =
+    authState.isUnlocked &&
+    (authState.role === 'developer' ||
+      authState.role === 'admin' ||
+      !!authState.currentUser?.permissions.canDeleteTools);
 
   // Filter rows based on active Google Sheet tab with sequential sheet numbering
   const tabFilteredRows = useMemo(() => {
@@ -388,6 +410,8 @@ export default function App() {
       {/* Clean Simple Header */}
       <Header
         syncState={syncState}
+        authState={authState}
+        onOpenAuthModal={() => setAuthModalOpen(true)}
         onSyncNow={() => syncEngine.syncNow(true)}
         onOpenAppsScriptModal={() => setAppsScriptModalOpen(true)}
         onOpenBackupModal={() => setBackupModalOpen(true)}
@@ -429,6 +453,8 @@ export default function App() {
           <DataTableView
             rows={tabFilteredRows}
             activeSheetTab={activeSheetTab}
+            canEdit={canEdit}
+            canDelete={canDelete}
             onUpdateRow={handleUpdateRow}
             onDeleteRow={handleDeleteRow}
             onDuplicateRow={handleDuplicateRow}
@@ -445,6 +471,8 @@ export default function App() {
           <MobileCardView
             rows={tabFilteredRows}
             activeSheetTab={activeSheetTab}
+            canEdit={canEdit}
+            canDelete={canDelete}
             onUpdateRow={handleUpdateRow}
             onDeleteRow={handleDeleteRow}
             onDuplicateRow={handleDuplicateRow}
@@ -462,23 +490,39 @@ export default function App() {
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-500" />
             <span className="font-semibold text-slate-700 dark:text-slate-300">Electrical Team Tools List</span>
-            <span>— Active Sheet: <strong>{activeSheetTab}</strong> ({tabFilteredRows.length} items)</span>
+            <span>— Active Cloud Sheet: <strong>{activeSheetTab}</strong> ({tabFilteredRows.length} items)</span>
           </div>
 
           <div className="flex items-center gap-3 text-[11px]">
-            <span>IndexedDB Caching: Active</span>
+            <span>Mode: <strong>{authState.isUnlocked ? authState.role : 'Normal Viewer (Read-Only)'}</strong></span>
             <span>•</span>
             <button
-              onClick={() => setAppsScriptModalOpen(true)}
-              className="text-blue-600 dark:text-blue-400 hover:underline font-semibold"
+              onClick={() => setAuthModalOpen(true)}
+              className="text-indigo-600 dark:text-indigo-400 hover:underline font-semibold"
             >
-              Apps Script Code.gs &amp; index.html
+              {authState.isUnlocked ? 'User & Permissions Control' : 'Admin Login'}
             </button>
+            {authState.isUnlocked && (
+              <>
+                <span>•</span>
+                <button
+                  onClick={() => setAppsScriptModalOpen(true)}
+                  className="text-blue-600 dark:text-blue-400 hover:underline font-semibold"
+                >
+                  Apps Script Code.gs
+                </button>
+              </>
+            )}
           </div>
         </div>
       </footer>
 
       {/* Modals */}
+      <AuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        authState={authState}
+      />
       <ConflictModal
         conflicts={conflicts}
         onResolve={(conflictId, strategy) => storageService.resolveConflict(conflictId, strategy)}

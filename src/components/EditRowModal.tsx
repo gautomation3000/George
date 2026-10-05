@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { SheetRow, EquipmentCondition, EquipmentType } from '../types/sheet';
+import { formatDateStamp, calculateDueDays } from '../utils/dateUtils';
 import {
   Edit3,
   PlusCircle,
@@ -56,17 +57,29 @@ export const EditRowModal: React.FC<Props> = ({
       setType('common');
       setCondition('Good');
       setLocation('AD-12');
-      setCalibrationDueDate('10-Mar-2027');
-      setDueDays(155);
+      setCalibrationDueDate('10.Mar.2027');
+      setDueDays(calculateDueDays('10.Mar.2027') ?? 155);
       setRemarks('');
     }
   }, [rowToEdit, isOpen]);
+
+  useEffect(() => {
+    if (calibrationDueDate) {
+      const calculated = calculateDueDays(calibrationDueDate);
+      if (calculated !== null) {
+        setDueDays(calculated);
+      }
+    }
+  }, [calibrationDueDate]);
 
   if (!isOpen) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!description.trim()) return;
+
+    const formattedDue = formatDateStamp(calibrationDueDate.trim());
+    const calculatedDueDays = calculateDueDays(calibrationDueDate.trim());
 
     const rowData: SheetRow = {
       id: rowToEdit ? rowToEdit.id : 'item_' + Date.now(),
@@ -78,9 +91,9 @@ export const EditRowModal: React.FC<Props> = ({
       type,
       condition,
       location: location.trim(),
-      calibrationDueDate: calibrationDueDate.trim(),
+      calibrationDueDate: formattedDue !== '—' ? formattedDue : calibrationDueDate.trim(),
       remarks: remarks.trim(),
-      dueDays,
+      dueDays: calculatedDueDays !== null ? calculatedDueDays : dueDays,
       lastModified: new Date().toISOString(),
       lastModifiedBy: 'You',
       version: rowToEdit ? (rowToEdit.version || 1) + 1 : 1,

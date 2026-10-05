@@ -5,6 +5,7 @@ import {
   TeamMember,
   SortConfig
 } from '../types/sheet';
+import { formatDateStamp, calculateDueDays } from '../utils/dateUtils';
 import {
   Search,
   ArrowUpDown,
@@ -30,6 +31,8 @@ import { ExcelService } from '../services/excelService';
 interface Props {
   rows: SheetRow[];
   activeSheetTab?: string;
+  canEdit?: boolean;
+  canDelete?: boolean;
   onUpdateRow: (row: SheetRow) => void;
   onDeleteRow: (id: string) => void;
   onDuplicateRow: (row: SheetRow) => void;
@@ -43,6 +46,8 @@ interface Props {
 export const DataTableView: React.FC<Props> = ({
   rows,
   activeSheetTab = 'Full list',
+  canEdit = true,
+  canDelete = true,
   onUpdateRow,
   onDeleteRow,
   onDuplicateRow,
@@ -59,24 +64,24 @@ export const DataTableView: React.FC<Props> = ({
   const [onlyOverdue, setOnlyOverdue] = useState<boolean>(false);
   const [sortConfig, setSortConfig] = useState<SortConfig>({ field: 'slno', direction: 'asc' });
 
-  // Pagination
+  // Pagination & Density
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(25);
   const [density, setDensity] = useState<'compact' | 'normal' | 'spacious'>('normal');
 
-  // Column Visibility
+  // Column Visibility: By default, ONLY Serial no., Description, Location, and Calibration Due Date are shown!
   const [visibleColumns, setVisibleColumns] = useState({
     slno: true,
     description: true,
-    make: true,
-    model: true,
-    serialNo: true,
-    type: true,
-    condition: true,
+    make: false,
+    model: false,
+    serialNo: false,
+    type: false,
+    condition: false,
     location: true,
     calibrationDueDate: true,
-    dueDays: true,
-    remarks: true,
+    dueDays: false,
+    remarks: false,
     actions: true,
   });
 
@@ -115,8 +120,8 @@ export const DataTableView: React.FC<Props> = ({
       if (typeFilter !== 'all' && row.type?.trim().toLowerCase() !== typeFilter.toLowerCase()) return false;
 
       if (onlyOverdue) {
-        const num = Number(row.dueDays);
-        const isNeg = !isNaN(num) && num < 0;
+        const days = calculateDueDays(row.calibrationDueDate);
+        const isNeg = days !== null && days < 0;
         const isRemarkDue = row.remarks && row.remarks.toLowerCase().includes('due for calibration');
         if (!isNeg && !isRemarkDue) return false;
       }
@@ -233,8 +238,19 @@ export const DataTableView: React.FC<Props> = ({
     return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800';
   };
 
+  const thPadding =
+    density === 'compact'
+      ? 'py-1.5 px-2.5 text-[10px]'
+      : density === 'spacious'
+      ? 'py-3.5 px-4 text-xs'
+      : 'py-2.5 px-3 text-[11px]';
+
   const cellPadding =
-    density === 'compact' ? 'py-2 px-3 text-xs' : density === 'spacious' ? 'py-3.5 px-4 text-sm' : 'py-2.5 px-3.5 text-xs sm:text-sm';
+    density === 'compact'
+      ? 'py-1 px-2.5 text-xs'
+      : density === 'spacious'
+      ? 'py-3.5 px-4 text-sm'
+      : 'py-2 px-3 text-xs sm:text-sm';
 
   return (
     <div className="space-y-4">
@@ -421,8 +437,8 @@ export const DataTableView: React.FC<Props> = ({
         <div className="overflow-x-auto max-w-full">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="bg-slate-50/80 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-700 text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider select-none">
-                <th className="py-3 px-3 w-10 text-center">
+              <tr className="bg-slate-50/80 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-700 font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider select-none">
+                <th className={`${thPadding} w-10 text-center`}>
                   <input
                     type="checkbox"
                     checked={selectedIds.size > 0 && selectedIds.size === paginatedRows.length}
@@ -432,7 +448,7 @@ export const DataTableView: React.FC<Props> = ({
                 </th>
 
                 {visibleColumns.slno && (
-                  <th onClick={() => handleSort('slno')} className="py-3 px-3 min-w-[75px] cursor-pointer group">
+                  <th onClick={() => handleSort('slno')} className={`${thPadding} min-w-[75px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>{activeSheetTab !== 'Full list' ? 'S.No' : 'SLNO'}</span>
                       {getSortIcon('slno')}
@@ -441,7 +457,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.description && (
-                  <th onClick={() => handleSort('description')} className="py-3 px-3 min-w-[220px] cursor-pointer group">
+                  <th onClick={() => handleSort('description')} className={`${thPadding} min-w-[220px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Description</span>
                       {getSortIcon('description')}
@@ -450,7 +466,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.make && (
-                  <th onClick={() => handleSort('make')} className="py-3 px-3 min-w-[120px] cursor-pointer group">
+                  <th onClick={() => handleSort('make')} className={`${thPadding} min-w-[120px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Make</span>
                       {getSortIcon('make')}
@@ -459,7 +475,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.model && (
-                  <th onClick={() => handleSort('model')} className="py-3 px-3 min-w-[110px] cursor-pointer group">
+                  <th onClick={() => handleSort('model')} className={`${thPadding} min-w-[110px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Model</span>
                       {getSortIcon('model')}
@@ -468,7 +484,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.serialNo && (
-                  <th onClick={() => handleSort('serialNo')} className="py-3 px-3 min-w-[130px] cursor-pointer group">
+                  <th onClick={() => handleSort('serialNo')} className={`${thPadding} min-w-[130px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Serial No</span>
                       {getSortIcon('serialNo')}
@@ -477,7 +493,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.type && (
-                  <th onClick={() => handleSort('type')} className="py-3 px-3 min-w-[100px] cursor-pointer group">
+                  <th onClick={() => handleSort('type')} className={`${thPadding} min-w-[100px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Type</span>
                       {getSortIcon('type')}
@@ -486,7 +502,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.condition && (
-                  <th onClick={() => handleSort('condition')} className="py-3 px-3 min-w-[140px] cursor-pointer group">
+                  <th onClick={() => handleSort('condition')} className={`${thPadding} min-w-[140px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Condition</span>
                       {getSortIcon('condition')}
@@ -495,7 +511,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.location && (
-                  <th onClick={() => handleSort('location')} className="py-3 px-3 min-w-[140px] cursor-pointer group">
+                  <th onClick={() => handleSort('location')} className={`${thPadding} min-w-[140px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Location / Individual</span>
                       {getSortIcon('location')}
@@ -504,7 +520,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.calibrationDueDate && (
-                  <th onClick={() => handleSort('calibrationDueDate')} className="py-3 px-3 min-w-[130px] cursor-pointer group">
+                  <th onClick={() => handleSort('calibrationDueDate')} className={`${thPadding} min-w-[130px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Calibration Due</span>
                       {getSortIcon('calibrationDueDate')}
@@ -513,7 +529,7 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.dueDays && (
-                  <th onClick={() => handleSort('dueDays')} className="py-3 px-3 min-w-[100px] cursor-pointer group">
+                  <th onClick={() => handleSort('dueDays')} className={`${thPadding} min-w-[100px] cursor-pointer group`}>
                     <div className="flex items-center gap-1">
                       <span>Due Days</span>
                       {getSortIcon('dueDays')}
@@ -522,11 +538,11 @@ export const DataTableView: React.FC<Props> = ({
                 )}
 
                 {visibleColumns.remarks && (
-                  <th className="py-3 px-3 min-w-[200px]">Remarks</th>
+                  <th className={`${thPadding} min-w-[200px]`}>Remarks</th>
                 )}
 
                 {visibleColumns.actions && (
-                  <th className="py-3 px-3 w-20 text-right">Actions</th>
+                  <th className={`${thPadding} w-20 text-right`}>Actions</th>
                 )}
               </tr>
             </thead>
@@ -544,8 +560,8 @@ export const DataTableView: React.FC<Props> = ({
                 paginatedRows.map((row) => {
                   const isSelected = selectedIds.has(row.id);
                   const isHighlighted = highlightedRowId === row.id;
-                  const dueNum = Number(row.dueDays);
-                  const isOverdue = !isNaN(dueNum) && dueNum < 0;
+                  const dueDaysCalc = calculateDueDays(row.calibrationDueDate);
+                  const isOverdue = dueDaysCalc !== null && dueDaysCalc < 0;
 
                   return (
                     <tr
@@ -570,30 +586,20 @@ export const DataTableView: React.FC<Props> = ({
                         />
                       </td>
 
-                      {/* SLNO */}
+                      {/* SLNO / Serial no. - Clean number without '#' symbol */}
                       {visibleColumns.slno && (
                         <td className={`${cellPadding} font-mono font-semibold`}>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-slate-800 dark:text-slate-200">
-                              {row.sheetSlno ?? row.slno}
-                            </span>
-                            {activeSheetTab !== 'Full list' && (
-                              <span
-                                className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono font-normal"
-                                title={`Full list S.No: #${row.slno}`}
-                              >
-                                #{row.slno}
-                              </span>
-                            )}
-                          </div>
+                          <span className="text-slate-800 dark:text-slate-200">
+                            {row.sheetSlno ?? row.slno}
+                          </span>
                         </td>
                       )}
 
-                      {/* Description (Inline Editable) */}
+                      {/* Description (Inline Editable when permitted) */}
                       {visibleColumns.description && (
                         <td className={`${cellPadding} font-medium text-slate-900 dark:text-white`}>
-                          <div className="flex items-center gap-1.5">
-                            {editingCell?.id === row.id && editingCell.field === 'description' ? (
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {editingCell?.id === row.id && editingCell.field === 'description' && canEdit ? (
                               <input
                                 autoFocus
                                 type="text"
@@ -608,13 +614,24 @@ export const DataTableView: React.FC<Props> = ({
                               />
                             ) : (
                               <span
-                                onDoubleClick={() => startEditing(row, 'description')}
-                                title="Double click to edit description"
-                                className="hover:underline cursor-pointer decoration-dotted"
+                                onDoubleClick={() => canEdit && startEditing(row, 'description')}
+                                title={canEdit ? 'Double click to edit description' : undefined}
+                                className={canEdit ? 'hover:underline cursor-pointer decoration-dotted' : ''}
                               >
                                 {row.description}
                               </span>
                             )}
+
+                            {/* When Make column is hidden, show Make in a neat small box right after description */}
+                            {!visibleColumns.make && row.make && (
+                              <span
+                                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded border border-slate-200 dark:border-slate-700 shadow-2xs shrink-0"
+                                title={`Make: ${row.make}`}
+                              >
+                                {row.make}
+                              </span>
+                            )}
+
                             {row.syncStatus === 'pending' && (
                               <span className="w-2 h-2 rounded-full bg-orange-500 shrink-0" title="Changes queued in IndexedDB" />
                             )}
@@ -662,30 +679,40 @@ export const DataTableView: React.FC<Props> = ({
                         </td>
                       )}
 
-                      {/* Condition (Quick Inline Dropdown) */}
+                      {/* Condition (Quick Inline Dropdown when permitted) */}
                       {visibleColumns.condition && (
                         <td className={cellPadding}>
-                          <select
-                            value={row.condition}
-                            onChange={(e) => {
-                              onUpdateRow({
-                                ...row,
-                                condition: e.target.value as EquipmentCondition,
-                                lastModified: new Date().toISOString(),
-                                lastModifiedBy: 'You',
-                                version: (row.version || 1) + 1,
-                                syncStatus: 'pending',
-                              });
-                            }}
-                            className={`px-2.5 py-1 rounded-full text-xs font-semibold border cursor-pointer focus:outline-hidden ${getConditionBadge(
-                              row.condition
-                            )}`}
-                          >
-                            <option value="Good">Good</option>
-                            <option value="Under Repair">Under Repair</option>
-                            <option value="spare / Emergency">spare / Emergency</option>
-                            <option value="Faulty">Faulty</option>
-                          </select>
+                          {canEdit ? (
+                            <select
+                              value={row.condition}
+                              onChange={(e) => {
+                                onUpdateRow({
+                                  ...row,
+                                  condition: e.target.value as EquipmentCondition,
+                                  lastModified: new Date().toISOString(),
+                                  lastModifiedBy: 'You',
+                                  version: (row.version || 1) + 1,
+                                  syncStatus: 'pending',
+                                });
+                              }}
+                              className={`px-2.5 py-1 rounded-full text-xs font-semibold border cursor-pointer focus:outline-hidden ${getConditionBadge(
+                                row.condition
+                              )}`}
+                            >
+                              <option value="Good">Good</option>
+                              <option value="Under Repair">Under Repair</option>
+                              <option value="spare / Emergency">spare / Emergency</option>
+                              <option value="Faulty">Faulty</option>
+                            </select>
+                          ) : (
+                            <span
+                              className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold border ${getConditionBadge(
+                                row.condition
+                              )}`}
+                            >
+                              {row.condition}
+                            </span>
+                          )}
                         </td>
                       )}
 
@@ -700,22 +727,26 @@ export const DataTableView: React.FC<Props> = ({
 
                       {/* Calibration Due Date */}
                       {visibleColumns.calibrationDueDate && (
-                        <td className={`${cellPadding} font-mono text-xs ${isOverdue ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-slate-500'}`}>
-                          {row.calibrationDueDate}
+                        <td className={`${cellPadding} font-mono text-xs ${isOverdue ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-slate-600 dark:text-slate-400'}`}>
+                          {formatDateStamp(row.calibrationDueDate)}
                         </td>
                       )}
 
                       {/* Due Days (Negative = Overdue) */}
                       {visibleColumns.dueDays && (
                         <td className={cellPadding}>
-                          {isOverdue ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-500 text-white">
-                              {dueNum} (Overdue)
-                            </span>
+                          {dueDaysCalc !== null ? (
+                            isOverdue ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-500 text-white">
+                                {dueDaysCalc} (Overdue)
+                              </span>
+                            ) : (
+                              <span className="font-mono text-xs font-medium text-slate-600 dark:text-slate-400">
+                                {dueDaysCalc} days
+                              </span>
+                            )
                           ) : (
-                            <span className="font-mono text-xs font-medium text-slate-600 dark:text-slate-400">
-                              {row.dueDays !== undefined ? row.dueDays : ''}
-                            </span>
+                            <span className="text-slate-400">—</span>
                           )}
                         </td>
                       )}
@@ -731,31 +762,46 @@ export const DataTableView: React.FC<Props> = ({
                       {visibleColumns.actions && (
                         <td className={`${cellPadding} text-right`}>
                           <div className="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100 transition-opacity">
-                            <button
-                              onClick={() => onOpenEditModal(row)}
-                              className="p-1 rounded text-slate-500 hover:text-indigo-600"
-                              title="Edit item"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => onDuplicateRow(row)}
-                              className="p-1 rounded text-slate-500 hover:text-emerald-600"
-                              title="Duplicate item"
-                            >
-                              <Copy className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (window.confirm(`Delete item #${row.slno} (${row.description})?`)) {
-                                  onDeleteRow(row.id);
-                                }
-                              }}
-                              className="p-1 rounded text-slate-500 hover:text-rose-600"
-                              title="Delete item"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            {canEdit && (
+                              <button
+                                onClick={() => onOpenEditModal(row)}
+                                className="p-1 rounded text-slate-500 hover:text-indigo-600"
+                                title="Edit item"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {canEdit && (
+                              <button
+                                onClick={() => onDuplicateRow(row)}
+                                className="p-1 rounded text-slate-500 hover:text-emerald-600"
+                                title="Duplicate item"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {canDelete && (
+                              <button
+                                onClick={() => {
+                                  if (window.confirm(`Delete item ${row.sheetSlno ?? row.slno} (${row.description})?`)) {
+                                    onDeleteRow(row.id);
+                                  }
+                                }}
+                                className="p-1 rounded text-slate-500 hover:text-rose-600"
+                                title="Delete item"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {!canEdit && !canDelete && (
+                              <button
+                                onClick={() => onOpenEditModal(row)}
+                                className="p-1 rounded text-slate-400 hover:text-slate-600"
+                                title="View details"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         </td>
                       )}
