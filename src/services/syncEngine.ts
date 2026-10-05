@@ -2,6 +2,9 @@ import { SheetRow, SyncState, QueuedAction } from '../types/sheet';
 import { storageService } from './storageService';
 import { soundManager } from './audio';
 
+export const DEFAULT_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbypwpU_aVPgOaUcR55QuzRwKVAilju61khy0udL21zA5_gomnpUuVtbsn2fuqnb_0CS/exec';
+
 type SyncListener = (state: SyncState) => void;
 
 class SyncEngine {
@@ -9,10 +12,10 @@ class SyncEngine {
     status: 'synced',
     lastSyncedAt: new Date().toISOString(),
     pendingCount: 0,
-    latencyMs: 35,
+    latencyMs: 42,
     errorMessage: null,
-    backendType: 'broadcast_live',
-    appsScriptUrl: '',
+    backendType: 'apps_script',
+    appsScriptUrl: DEFAULT_APPS_SCRIPT_URL,
     autoSyncInterval: 10,
     storageMode: 'IndexedDB + LocalStorage',
   };
@@ -20,15 +23,17 @@ class SyncEngine {
   private listeners: Set<SyncListener> = new Set();
   private autoSyncTimer: any = null;
   private isFlushing: boolean = false;
+  private hasInitialSynced: boolean = false;
 
   constructor() {
     if (typeof window !== 'undefined') {
-      const savedUrl = localStorage.getItem('sheetsync_appsscript_url') || '';
+      const savedUrl = localStorage.getItem('sheetsync_appsscript_url') || DEFAULT_APPS_SCRIPT_URL;
       const savedInterval = Number(localStorage.getItem('sheetsync_auto_interval')) || 10;
       this.syncState.appsScriptUrl = savedUrl;
       this.syncState.autoSyncInterval = savedInterval;
       if (savedUrl) {
         this.syncState.backendType = 'apps_script';
+        localStorage.setItem('sheetsync_appsscript_url', savedUrl);
       }
 
       window.addEventListener('online', () => this.handleNetworkChange(true));
@@ -44,6 +49,14 @@ class SyncEngine {
 
       this.updatePendingCount();
       this.startAutoSync();
+
+      // Trigger initial background sync to fetch latest Google Sheet data
+      setTimeout(() => {
+        if (!this.hasInitialSynced && storageService.isOnline()) {
+          this.syncNow(false);
+          this.hasInitialSynced = true;
+        }
+      }, 500);
     }
   }
 
@@ -59,19 +72,23 @@ class SyncEngine {
 
   private notify() {
     const state = this.getState();
-    this.listeners.forEach(fn => fn(state));
+    this.listeners.forEach((fn) => fn(state));
   }
 
   public setAppsScriptUrl(url: string) {
-    this.syncState.appsScriptUrl = url.trim();
-    if (url.trim()) {
+    const trimmed = url.trim();
+    this.syncState.appsScriptUrl = trimmed;
+    if (trimmed) {
       this.syncState.backendType = 'apps_script';
-      localStorage.setItem('sheetsync_appsscript_url', url.trim());
+      localStorage.setItem('sheetsync_appsscript_url', trimmed);
     } else {
       this.syncState.backendType = 'broadcast_live';
       localStorage.removeItem('sheetsync_appsscript_url');
     }
     this.notify();
+    if (trimmed && storageService.isOnline()) {
+      this.syncNow(false);
+    }
   }
 
   public setAutoSyncInterval(seconds: number) {
@@ -137,18 +154,25 @@ class SyncEngine {
 
     try {
       const queue = storageService.getQueue();
-      const appsScriptUrl = this.syncState.appsScriptUrl;
+      const appsScriptUrl = this.syncState.appsScriptUrl || DEFAULT_APPS_SCRIPT_URL;
 
       if (appsScriptUrl) {
+        // Step 1: Flush any queued mutations to Google Sheet
         if (queue.length > 0) {
           await this.flushQueueToAppsScript(appsScriptUrl, queue);
         }
 
+        // Step 2: Fetch latest rows from Google Sheet
         try {
-          const fetchUrl = appsScriptUrl + (appsScriptUrl.includes('?') ? '&' : '?') + 'action=getData&_t=' + Date.now();
+          const fetchUrl =
+            appsScriptUrl +
+            (appsScriptUrl.includes('?') ? '&' : '?') +
+            'action=getData&_t=' +
+            Date.now();
+
           const res = await fetch(fetchUrl, {
             method: 'GET',
-            headers: { 'Accept': 'application/json' },
+            headers: { Accept: 'application/json' },
           });
 
           if (res.ok) {
@@ -158,12 +182,16 @@ class SyncEngine {
             }
           }
         } catch (fetchErr) {
-          console.warn('Apps Script sync fallback to IndexedDB mesh', fetchErr);
+          console.warn('Apps Script sync fallback to IndexedDB cache', fetchErr);
         }
       } else {
-        await new Promise(res => setTimeout(res, manual ? 350 : 120));
+        await new Promise((res) => setTimeout(res, manual ? 350 : 120));
         const currentRows = storageService.getRows();
-        const updated = currentRows.map(r => r.syncStatus === 'pending' || r.syncStatus === 'syncing' ? { ...r, syncStatus: 'synced' as const } : r);
+        const updated = currentRows.map((r) =>
+          r.syncStatus === 'pending' || r.syncStatus === 'syncing'
+            ? { ...r, syncStatus: 'synced' as const }
+            : r
+        );
         storageService.saveRows(updated, true);
         storageService.clearQueue();
       }
@@ -172,7 +200,7 @@ class SyncEngine {
       this.syncState.latencyMs = duration;
       this.syncState.status = 'synced';
       this.syncState.lastSyncedAt = new Date().toISOString();
-      this.syncState.pendingCount = 0;
+      this.syncState.pendingCount = storageService.getQueue().length;
       this.syncState.errorMessage = null;
 
       if (manual) {
@@ -181,7 +209,6 @@ class SyncEngine {
 
       this.notify();
       return { success: true, message: `Synchronized with Google Sheet in ${duration}ms` };
-
     } catch (err: any) {
       console.error('Sync failed:', err);
       this.syncState.status = 'error';
@@ -196,39 +223,81 @@ class SyncEngine {
   private async flushQueueToAppsScript(url: string, queue: QueuedAction[]) {
     for (const item of queue) {
       try {
+        const payload = item.payload;
         let body: any = {
           action: 'updateRowWithConflictCheck',
-          row: item.payload,
-          baseVersion: item.baseVersion || item.payload.version || 1,
-          forceOverwrite: item.payload.forceOverwrite === true,
+          row: payload,
+          baseVersion: item.baseVersion || payload.version || 1,
+          forceOverwrite: true, // User modifications take precedence
         };
 
         if (item.type === 'ADD_ROW') {
           body.action = 'addRow';
         } else if (item.type === 'DELETE_ROW') {
           body.action = 'deleteRow';
-          body.rowId = item.payload.id;
+          body.rowId = payload.id;
+          body.slno = payload.slno;
         }
 
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify(body),
-        });
+        let updateSuccess = false;
+        let respData: any = null;
 
-        if (res.ok) {
-          const resp = await res.json();
-          if (resp && resp.conflict) {
-            // Register conflict
-            storageService.addConflict({
-              rowId: item.payload.id,
-              clientRow: item.payload,
-              serverRow: resp.serverRow,
-              conflictType: 'VERSION_MISMATCH',
-            });
-          } else {
-            storageService.removeQueuedAction(item.id);
+        // Method A: POST with text/plain (no preflight, follows redirects)
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            redirect: 'follow',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(body),
+          });
+
+          if (res.ok) {
+            respData = await res.json();
+            if (respData && (respData.success || respData.message)) {
+              updateSuccess = true;
+            }
           }
+        } catch (postErr) {
+          console.warn('POST sync attempt failed, trying GET fallback', postErr);
+        }
+
+        // Method B: GET fallback with encoded payload (100% immune to POST CORS / Drive redirect issues)
+        if (!updateSuccess) {
+          try {
+            const dataParam = encodeURIComponent(JSON.stringify(body.row || body));
+            const getUrl = `${url}${url.includes('?') ? '&' : '?'}action=${body.action}&data=${dataParam}&baseVersion=${body.baseVersion}&forceOverwrite=true&_t=${Date.now()}`;
+            const resGet = await fetch(getUrl, {
+              method: 'GET',
+            });
+            if (resGet.ok) {
+              respData = await resGet.json();
+              if (respData && (respData.success || respData.message)) {
+                updateSuccess = true;
+              }
+            }
+          } catch (getErr) {
+            console.warn('GET sync fallback failed', getErr);
+          }
+        }
+
+        if (updateSuccess) {
+          storageService.removeQueuedAction(item.id);
+          if (respData && respData.newVersion) {
+            const currentRows = storageService.getRows();
+            const updated = currentRows.map((r) =>
+              r.id === payload.id
+                ? { ...r, version: respData.newVersion, syncStatus: 'synced' as const }
+                : r
+            );
+            storageService.saveRows(updated, false);
+          }
+        } else if (respData && respData.conflict) {
+          storageService.addConflict({
+            rowId: payload.id,
+            clientRow: payload,
+            serverRow: respData.serverRow,
+            conflictType: 'VERSION_MISMATCH',
+          });
         }
       } catch (e) {
         console.warn('Queue flush error', item, e);
@@ -243,12 +312,66 @@ class SyncEngine {
 
   private mergeRemoteRows(remoteData: any[]) {
     const localRows = storageService.getRows();
-    const localMap = new Map(localRows.map(r => [r.id, r]));
+    const localMap = new Map(localRows.map((r) => [r.id, r]));
     const merged: SheetRow[] = [];
 
     remoteData.forEach((rem, idx) => {
-      const id = rem.id || rem.ID || ('item_' + (rem.SLNO || idx + 1));
+      const slno = Number(rem.slno || rem.SLNO) || idx + 1;
+      const id = rem.id || rem.ID || 'item_' + slno;
       const existing = localMap.get(id);
+
+      const conditionVal = rem.condition || (existing ? existing.condition : 'Good');
+      const descVal =
+        rem.description !== undefined && rem.description !== ''
+          ? rem.description
+          : rem.Description || (existing ? existing.description : 'Equipment Item');
+      const makeVal =
+        rem.make !== undefined && rem.make !== ''
+          ? rem.make
+          : rem.Make || (existing ? existing.make : '');
+      const modelVal =
+        rem.model !== undefined && rem.model !== ''
+          ? String(rem.model)
+          : rem.Model !== undefined
+          ? String(rem.Model)
+          : existing
+          ? existing.model
+          : '';
+      const serialVal =
+        rem.serialNo !== undefined && rem.serialNo !== ''
+          ? String(rem.serialNo)
+          : rem['Serial No'] !== undefined
+          ? String(rem['Serial No'])
+          : existing
+          ? existing.serialNo
+          : '';
+      const typeVal = rem.type || rem['Personal /Common'] || (existing ? existing.type : 'common');
+      const locVal =
+        rem.location !== undefined && rem.location !== ''
+          ? rem.location
+          : rem['Location/Individual'] || (existing ? existing.location : 'AD-12');
+      const calibVal =
+        rem.calibrationDueDate !== undefined && rem.calibrationDueDate !== ''
+          ? rem.calibrationDueDate
+          : rem['Calibration due date'] || (existing ? existing.calibrationDueDate : '');
+      const remarksVal =
+        rem.remarks !== undefined && rem.remarks !== ''
+          ? rem.remarks
+          : rem.Remarks !== undefined
+          ? rem.Remarks
+          : existing
+          ? existing.remarks
+          : '';
+      const dueDaysVal =
+        rem.dueDays !== undefined
+          ? rem.dueDays
+          : rem['Due days'] !== undefined
+          ? rem['Due days']
+          : existing
+          ? existing.dueDays
+          : '';
+      const versionVal = Number(rem.version || rem.Version) || (existing ? existing.version : 1);
+      const lastModVal = rem.lastModified || rem['Last Modified'] || new Date().toISOString();
 
       if (existing) {
         if (existing.syncStatus === 'pending') {
@@ -256,18 +379,18 @@ class SyncEngine {
         } else {
           merged.push({
             ...existing,
-            description: rem.Description || rem.description || existing.description,
-            make: rem.Make || rem.make || existing.make,
-            model: rem.Model || rem.model || existing.model,
-            serialNo: rem['Serial No'] || rem.serialNo || existing.serialNo,
-            type: rem['Personal /Common'] || rem.type || existing.type,
-            condition: rem.condition || existing.condition,
-            location: rem['Location/Individual'] || rem.location || existing.location,
-            calibrationDueDate: rem['Calibration due date'] || rem.calibrationDueDate || existing.calibrationDueDate,
-            remarks: rem.Remarks || rem.remarks || existing.remarks,
-            dueDays: rem['Due days'] !== undefined ? rem['Due days'] : existing.dueDays,
-            version: Number(rem.Version || rem.version) || existing.version,
-            lastModified: rem['Last Modified'] || rem.lastModified || existing.lastModified,
+            description: descVal,
+            make: makeVal,
+            model: modelVal,
+            serialNo: serialVal,
+            type: typeVal,
+            condition: conditionVal,
+            location: locVal,
+            calibrationDueDate: calibVal,
+            remarks: remarksVal,
+            dueDays: dueDaysVal,
+            version: versionVal,
+            lastModified: lastModVal,
             syncStatus: 'synced',
           });
         }
@@ -275,26 +398,26 @@ class SyncEngine {
       } else {
         merged.push({
           id: id,
-          slno: Number(rem.SLNO) || (idx + 1),
-          description: rem.Description || rem.description || 'Equipment Item',
-          make: rem.Make || rem.make || '',
-          model: rem.Model || rem.model || '',
-          serialNo: rem['Serial No'] || rem.serialNo || '',
-          type: rem['Personal /Common'] || rem.type || 'common',
-          condition: rem.condition || 'Good',
-          location: rem['Location/Individual'] || rem.location || 'AD-12',
-          calibrationDueDate: rem['Calibration due date'] || rem.calibrationDueDate || '',
-          remarks: rem.Remarks || rem.remarks || '',
-          dueDays: rem['Due days'] !== undefined ? rem['Due days'] : '',
-          version: Number(rem.Version || rem.version) || 1,
-          lastModified: rem['Last Modified'] || new Date().toISOString(),
+          slno: slno,
+          description: descVal,
+          make: makeVal,
+          model: modelVal,
+          serialNo: serialVal,
+          type: typeVal,
+          condition: conditionVal,
+          location: locVal,
+          calibrationDueDate: calibVal,
+          remarks: remarksVal,
+          dueDays: dueDaysVal,
+          version: versionVal,
+          lastModified: lastModVal,
           lastModifiedBy: 'Google Sheet Sync',
           syncStatus: 'synced',
         });
       }
     });
 
-    localMap.forEach(row => merged.push(row));
+    localMap.forEach((row) => merged.push(row));
     storageService.saveRows(merged, true);
   }
 }

@@ -6,50 +6,84 @@
 export const APPS_SCRIPT_BACKEND_CODE = `/**
  * =========================================================================
  * SheetSync Pro - Google Apps Script Backend (Code.gs)
- * Equipment Calibration & Asset Tracker with Real-Time Two-Way Sync,
- * IndexedDB Offline Queue Processing, Concurrency Locks & Conflict Resolution
+ * Electrical Team Tools List - Master Calibration & Asset Tracker
  * =========================================================================
  *
  * HOW TO DEPLOY:
- * 1. In your Google Sheet, click "Extensions" > "Apps Script".
- * 2. Delete any existing code in Code.gs and paste this entire code.
- * 3. In Apps Script, click the "+" icon beside "Files", select "HTML", name it "index" (creates index.html).
- * 4. Paste the companion index.html code into that file.
- * 5. Click "Deploy" > "New deployment" > Select type: "Web app".
- * 6. Set Description: "SheetSync Pro Realtime API & Offline Frontend".
- * 7. Execute as: "Me" (your email).
- * 8. Who has access: "Anyone" (allows direct access & API calls).
- * 9. Click "Deploy", authorize permissions, and copy the Web App URL!
+ * 1. Open your Google Sheet ("Electrical Team tools update full list").
+ * 2. Click "Extensions" > "Apps Script".
+ * 3. Delete any existing code in Code.gs and paste this entire code.
+ * 4. Click the "+" button beside Files > select HTML > name it "index" (paste index.html).
+ * 5. Click "Deploy" > "Manage deployments" > Edit current deployment (or "New deployment").
+ * 6. Set:
+ *    - Type: "Web app"
+ *    - Description: "Electrical Team Tools Live API"
+ *    - Execute as: "Me" (your email)
+ *    - Who has access: "Anyone" (CRITICAL: must be Anyone so the webapp can update)
+ * 7. Click Deploy, authorize permissions, and copy the Web App URL!
  */
 
-const SHEET_NAME = 'Sheet1'; // Change if your sheet tab has another name
+const DEFAULT_SHEET_NAME = 'Full list';
 const BACKUP_PREFIX = 'Backup_';
 
-// Standard equipment headers matching your spreadsheet
-const EXPECTED_HEADERS = [
-  'SLNO',
-  'Description',
-  'Make',
-  'Model',
-  'Serial No',
-  'Personal /Common',
-  'condition',
-  'Location/Individual',
-  'Calibration due date',
-  'Remarks',
-  'Due days',
-  'Version',
-  'Last Modified',
-  'ID'
-];
+/**
+ * Normalizes header strings so line breaks ("SLN\\nO"), extra spaces, and casing match reliably
+ */
+function normalizeHeader(h) {
+  const norm = String(h || '').toLowerCase().replace(/[\r\n\s]+/g, '');
+  if (norm === 'id') return 'id'; // Keep ID separate from SLNO
+  if (norm.includes('sln') || norm === '#' || norm === 'sr' || norm === 'sno') return 'slno';
+  if (norm.includes('desc')) return 'description';
+  if (norm.includes('make')) return 'make';
+  if (norm.includes('model')) return 'model';
+  if (norm.includes('serial')) return 'serialNo';
+  if (norm.includes('person') || norm.includes('common')) return 'type';
+  if (norm.includes('cond')) return 'condition';
+  if (norm.includes('locat') || norm.includes('individ')) return 'location';
+  if (norm.includes('calib') || norm.includes('due date')) return 'calibrationDueDate';
+  if (norm.includes('remark')) return 'remarks';
+  if (norm.includes('due') || norm.includes('day')) return 'dueDays';
+  if (norm.includes('version')) return 'version';
+  if (norm.includes('modif')) return 'lastModified';
+  return norm;
+}
 
 /**
- * Serves GET requests or opens HTML Web UI
+ * Finds the correct target sheet ('Full list' or active sheet)
+ */
+function getTargetSheet(ss, sheetName) {
+  if (sheetName) {
+    const s = ss.getSheetByName(sheetName);
+    if (s) return s;
+  }
+  let target = ss.getSheetByName(DEFAULT_SHEET_NAME);
+  if (target) return target;
+
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    const name = sheets[i].getName().toLowerCase();
+    if (name === 'full list' || name === 'fulllist') return sheets[i];
+  }
+  for (let i = 0; i < sheets.length; i++) {
+    const val = String(sheets[i].getRange(1, 1).getValue()).toLowerCase();
+    if (val.includes('sln') || val.includes('desc')) return sheets[i];
+  }
+  return sheets[0];
+}
+
+/**
+ * Handles GET requests:
+ * 1. Supports updateRow via GET to completely bypass any CORS redirect issues!
+ * 2. Ping test (action=ping)
+ * 3. Fetch data as JSON (action=getData)
+ * 4. Serve index.html web UI or fallback UI
  */
 function doGet(e) {
   try {
     const action = (e && e.parameter && e.parameter.action) || 'ui';
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
 
+    // --- Action: PING ---
     if (action === 'ping') {
       return jsonResponse({
         success: true,
@@ -58,17 +92,82 @@ function doGet(e) {
       });
     }
 
+    // --- Action: UPDATE_ROW (Supported via GET for guaranteed delivery without CORS/POST redirect issues) ---
+    if (action === 'updateRow' || action === 'updateRowWithConflictCheck' || action === 'updateCell' || action === 'update') {
+      let rowData;
+      if (e.parameter.data) {
+        try {
+          rowData = JSON.parse(e.parameter.data);
+        } catch (err) {
+          rowData = e.parameter;
+        }
+      } else if (e.parameter.row) {
+        try {
+          rowData = JSON.parse(e.parameter.row);
+        } catch (err) {
+          rowData = e.parameter;
+        }
+      } else {
+        rowData = e.parameter;
+      }
+      const sheetName = e.parameter.sheet || (rowData && rowData.sheetName);
+      const sheet = getTargetSheet(ss, sheetName);
+      const result = updateEquipmentRowDirect(sheet, rowData);
+      return jsonResponse(result);
+    }
+
+    // --- Action: ADD_ROW via GET ---
+    if (action === 'addRow') {
+      let rowData;
+      if (e.parameter.data) {
+        try {
+          rowData = JSON.parse(e.parameter.data);
+        } catch (err) {
+          rowData = e.parameter;
+        }
+      } else {
+        rowData = e.parameter;
+      }
+      const sheetName = e.parameter.sheet || (rowData && rowData.sheetName);
+      const sheet = getTargetSheet(ss, sheetName);
+      const added = appendSingleRowDirect(sheet, rowData);
+      return jsonResponse({
+        success: true,
+        message: 'Row added successfully',
+        row: added,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // --- Action: DELETE_ROW via GET ---
+    if (action === 'deleteRow') {
+      const rowId = e.parameter.rowId || e.parameter.id || e.parameter.slno;
+      const sheetName = e.parameter.sheet;
+      const sheet = getTargetSheet(ss, sheetName);
+      const deleted = deleteRowByIdOrSlno(sheet, rowId);
+      return jsonResponse({
+        success: deleted,
+        message: deleted ? 'Row deleted' : 'Row not found',
+        rowId: rowId
+      });
+    }
+
+    // --- Action: GET_DATA ---
     if (action === 'getData') {
-      const data = getSheetDataAsJson();
+      const sheetName = e.parameter.sheet;
+      const sheet = getTargetSheet(ss, sheetName);
+      const data = getSheetDataAsJson(sheet);
       return jsonResponse({
         success: true,
         data: data.rows,
         headers: data.headers,
+        sheetName: sheet.getName(),
         totalCount: data.rows.length,
         timestamp: new Date().toISOString()
       });
     }
 
+    // --- Action: GET_BACKUPS ---
     if (action === 'getBackups') {
       return jsonResponse({
         success: true,
@@ -77,11 +176,18 @@ function doGet(e) {
       });
     }
 
-    // Default: Serve standalone index.html with IndexedDB offline support
-    return HtmlService.createHtmlOutputFromFile('index')
-      .setTitle('SheetSync Pro - Equipment Calibration & Tracker')
-      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
-      .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1');
+    // Default: Serve standalone index.html or robust built-in UI if index.html was not created
+    try {
+      return HtmlService.createHtmlOutputFromFile('index')
+        .setTitle('Electrical Team Tools List - SheetSync Pro')
+        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+        .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1');
+    } catch (htmlErr) {
+      return HtmlService.createHtmlOutput('<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>SheetSync Pro Backend</title><style>body{font-family:system-ui,-apple-system,sans-serif;padding:30px;background:#f8fafc;color:#1e293b;text-align:center;}h1{color:#16a34a;}.box{background:white;padding:28px;border-radius:18px;max-width:540px;margin:30px auto;box-shadow:0 10px 25px -5px rgba(0,0,0,0.08);border:1px solid #e2e8f0;}.btn{display:inline-block;padding:10px 20px;background:#2563eb;color:white;text-decoration:none;border-radius:10px;font-weight:600;margin-top:16px;}</style></head><body><div class=\"box\"><h1>✓ SheetSync Pro Backend Online</h1><p>Google Apps Script Web App is connected and communicating with your Google Sheets.</p><p style=\"color:#64748b;font-size:13px;\">Real-time endpoints active: <code>getData</code>, <code>updateRow</code>, <code>addRow</code>, <code>deleteRow</code>, <code>ping</code></p></div></body></html>')
+        .setTitle('Electrical Team Tools List - SheetSync Pro')
+        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+        .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1');
+    }
 
   } catch (err) {
     return jsonResponse({
@@ -93,16 +199,16 @@ function doGet(e) {
 }
 
 /**
- * Serves POST requests with Concurrency Lock & Conflict Resolution
+ * Handles POST requests with concurrency lock
  */
 function doPost(e) {
   const lock = LockService.getScriptLock();
-  const hasLock = lock.tryLock(30000); // 30-second lock to prevent race conditions
+  const hasLock = lock.tryLock(25000);
 
   if (!hasLock) {
     return jsonResponse({
       success: false,
-      error: 'Spreadsheet is busy processing another transaction. Please retry.',
+      error: 'Spreadsheet is busy. Please retry in a moment.',
       locked: true
     });
   }
@@ -110,83 +216,52 @@ function doPost(e) {
   try {
     let payload;
     if (e.postData && e.postData.contents) {
-      payload = JSON.parse(e.postData.contents);
+      try {
+        payload = JSON.parse(e.postData.contents);
+      } catch (ex) {
+        payload = e.parameter;
+      }
     } else {
       payload = e.parameter;
     }
 
     const action = payload.action;
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    let sheet = ss.getSheetByName(SHEET_NAME);
-    if (!sheet) sheet = ss.getSheets()[0];
+    const sheetName = payload.sheet || (payload.row && payload.row.sheetName);
+    const sheet = getTargetSheet(ss, sheetName);
 
-    // Ensure headers exist
-    ensureSheetHeaders(sheet);
-
-    // --- Action: UPDATE_ROW (with Conflict Detection) ---
-    if (action === 'updateRow' || action === 'updateRowWithConflictCheck') {
-      const rowData = payload.row;
-      const baseVersion = Number(payload.baseVersion) || Number(rowData.version) || 1;
-      const forceOverwrite = payload.forceOverwrite === true || payload.strategy === 'CLIENT_WINS';
-
-      const updateResult = updateRowWithConflictCheck(sheet, rowData, baseVersion, forceOverwrite);
-      return jsonResponse(updateResult);
-    }
-
-    // --- Action: ADD_ROW ---
-    if (action === 'addRow') {
-      const newRow = payload.row;
-      const added = appendSingleRow(sheet, newRow);
+    if (action === 'ping') {
       return jsonResponse({
         success: true,
-        message: 'Equipment row added successfully',
+        message: 'SheetSync Pro backend is online and active.',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    if (action === 'updateRow' || action === 'updateRowWithConflictCheck') {
+      const rowData = payload.row || payload.data || payload;
+      const result = updateEquipmentRowDirect(sheet, rowData);
+      return jsonResponse(result);
+    }
+
+    if (action === 'addRow') {
+      const newRow = payload.row || payload.data || payload;
+      const added = appendSingleRowDirect(sheet, newRow);
+      return jsonResponse({
+        success: true,
+        message: 'Equipment added successfully',
         row: added,
         timestamp: new Date().toISOString()
       });
     }
 
-    // --- Action: DELETE_ROW ---
     if (action === 'deleteRow') {
-      const rowId = payload.rowId || payload.id;
-      const deleted = deleteRowById(sheet, rowId);
+      const rowId = payload.rowId || payload.id || payload.slno;
+      const deleted = deleteRowByIdOrSlno(sheet, rowId);
       return jsonResponse({
         success: deleted,
-        message: deleted ? 'Row deleted from sheet' : 'Row ID not found',
-        rowId: rowId,
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // --- Action: BATCH_SYNC_OFFLINE_QUEUE ---
-    if (action === 'batchSync' || action === 'batchSyncOfflineQueue') {
-      const items = payload.queue || payload.rows || [];
-      const results = processOfflineQueueBatch(sheet, items);
-      return jsonResponse({
-        success: true,
-        results: results,
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // --- Action: CREATE_BACKUP ---
-    if (action === 'createBackup') {
-      const backupTitle = payload.title || 'Snapshot';
-      const backupName = createSheetBackup(ss, sheet, backupTitle);
-      return jsonResponse({
-        success: true,
-        backupSheetName: backupName,
-        message: 'Cloud backup tab created: ' + backupName,
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // --- Action: RESTORE_BACKUP ---
-    if (action === 'restoreBackup') {
-      restoreSheetBackup(ss, payload.backupSheetName);
-      return jsonResponse({
-        success: true,
-        message: 'Spreadsheet restored to ' + payload.backupSheetName,
-        timestamp: new Date().toISOString()
+        message: deleted ? 'Row deleted' : 'Row not found',
+        rowId: rowId
       });
     }
 
@@ -204,279 +279,187 @@ function doPost(e) {
 }
 
 /**
- * Direct function for google.script.run in index.html
+ * DIRECT ROW UPDATE FUNCTION
+ * Updates the specific row (e.g. SLNO 1 -> Row 2) and exact cells in Google Sheets
  */
-function getSheetDataAsJson() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) sheet = ss.getSheets()[0];
-
-  ensureSheetHeaders(sheet);
-
+function updateEquipmentRowDirect(sheet, rowData) {
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
-
   if (lastRow <= 1) {
-    return { headers: EXPECTED_HEADERS, rows: [] };
+    return { success: false, error: 'Sheet is empty' };
   }
 
-  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-  const headers = values[0].map(h => String(h).trim());
-  const rows = [];
-
-  for (let i = 1; i < values.length; i++) {
-    const rowObj = { _rowNumber: i + 1 };
-    for (let c = 0; c < headers.length; c++) {
-      rowObj[headers[c]] = values[i][c];
-    }
-    // Normalize properties for frontend
-    rowObj['id'] = rowObj['ID'] || rowObj['id'] || ('item_' + (rowObj['SLNO'] || i));
-    rowObj['slno'] = Number(rowObj['SLNO']) || i;
-    rowObj['description'] = rowObj['Description'] || '';
-    rowObj['make'] = rowObj['Make'] || '';
-    rowObj['model'] = rowObj['Model'] || '';
-    rowObj['serialNo'] = rowObj['Serial No'] || '';
-    rowObj['type'] = rowObj['Personal /Common'] || 'common';
-    rowObj['condition'] = rowObj['condition'] || 'Good';
-    rowObj['location'] = rowObj['Location/Individual'] || '';
-    rowObj['calibrationDueDate'] = rowObj['Calibration due date'] || '';
-    rowObj['remarks'] = rowObj['Remarks'] || '';
-    rowObj['dueDays'] = rowObj['Due days'] !== undefined ? rowObj['Due days'] : '';
-    rowObj['version'] = Number(rowObj['Version']) || 1;
-    rowObj['lastModified'] = rowObj['Last Modified'] || new Date().toISOString();
-
-    rows.push(rowObj);
+  const headerValues = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const colMap = {};
+  for (let c = 0; c < headerValues.length; c++) {
+    const mappedField = normalizeHeader(headerValues[c]);
+    colMap[mappedField] = c + 1; // 1-based column index
   }
 
-  return { headers: headers, rows: rows };
-}
-
-/**
- * Direct function for google.script.run from offline sync queue
- */
-function syncOfflineItem(item) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) sheet = ss.getSheets()[0];
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
-  try {
-    if (item.type === 'UPDATE' || item.type === 'UPDATE_ROW') {
-      return updateRowWithConflictCheck(sheet, item.payload, item.baseVersion, item.forceOverwrite);
-    } else if (item.type === 'ADD' || item.type === 'ADD_ROW') {
-      const added = appendSingleRow(sheet, item.payload);
-      return { success: true, row: added };
-    } else if (item.type === 'DELETE' || item.type === 'DELETE_ROW') {
-      const deleted = deleteRowById(sheet, item.rowId || item.payload.id);
-      return { success: deleted };
-    }
-    return { success: false, error: 'Unknown queue type' };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-/**
- * Updates a row with optimistic conflict checking
- */
-function updateRowWithConflictCheck(sheet, rowData, baseVersion, forceOverwrite) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
-  const idColIdx = headers.indexOf('ID');
-  const slnoColIdx = headers.indexOf('SLNO');
-  const versionColIdx = headers.indexOf('Version');
-  const values = sheet.getDataRange().getValues();
-
-  let targetRowIdx = -1;
-  const targetId = String(rowData.id || rowData.ID || '');
   const targetSlno = Number(rowData.slno || rowData.SLNO);
+  let targetRowIdx = -1;
 
-  for (let r = 1; r < values.length; r++) {
-    const rowId = idColIdx !== -1 ? String(values[r][idColIdx]) : '';
-    const rowSlno = slnoColIdx !== -1 ? Number(values[r][slnoColIdx]) : -1;
-    if ((targetId && rowId === targetId) || (targetSlno && rowSlno === targetSlno)) {
-      targetRowIdx = r + 1; // 1-based row index
-      break;
+  // Method 1: SLNO matches Row (SLNO 1 is Row 2)
+  if (targetSlno > 0 && targetSlno + 1 <= lastRow) {
+    const slnoCol = colMap['slno'] || 1;
+    const cellVal = sheet.getRange(targetSlno + 1, slnoCol).getValue();
+    if (Number(cellVal) === targetSlno) {
+      targetRowIdx = targetSlno + 1;
+    }
+  }
+
+  // Method 2: Scan Column 1 for targetSlno
+  if (targetRowIdx === -1 && targetSlno > 0) {
+    const colA = sheet.getRange(1, colMap['slno'] || 1, lastRow, 1).getValues();
+    for (let r = 1; r < colA.length; r++) {
+      if (Number(colA[r][0]) === targetSlno) {
+        targetRowIdx = r + 1;
+        break;
+      }
+    }
+  }
+
+  // Method 3: Match by Serial No if SLNO not found
+  if (targetRowIdx === -1 && rowData.serialNo && colMap['serialNo']) {
+    const colSerial = sheet.getRange(1, colMap['serialNo'], lastRow, 1).getValues();
+    for (let r = 1; r < colSerial.length; r++) {
+      if (String(colSerial[r][0]).trim() === String(rowData.serialNo).trim()) {
+        targetRowIdx = r + 1;
+        break;
+      }
     }
   }
 
   if (targetRowIdx === -1) {
-    // Row not found on server, append
-    const added = appendSingleRow(sheet, rowData);
-    return { success: true, message: 'Row not found on server, appended as new', row: added };
+    return { success: false, error: 'Row not found for SLNO: ' + targetSlno };
   }
 
-  // Check Conflict: Server version vs Base version
-  const currentServerVersion = versionColIdx !== -1 ? (Number(values[targetRowIdx - 1][versionColIdx]) || 1) : 1;
-
-  if (!forceOverwrite && baseVersion && currentServerVersion > baseVersion) {
-    // Conflict Detected! Server has a newer update
-    const serverRowObj = {};
-    for (let c = 0; c < headers.length; c++) {
-      serverRowObj[headers[c]] = values[targetRowIdx - 1][c];
-    }
-    return {
-      success: false,
-      conflict: true,
-      message: 'Conflict detected: Server has newer version (' + currentServerVersion + ' > ' + baseVersion + ').',
-      serverRow: serverRowObj,
-      clientRow: rowData,
-      serverVersion: currentServerVersion,
-      clientBaseVersion: baseVersion
-    };
+  // UPDATE INDIVIDUAL CELLS DIRECTLY
+  if (rowData.condition !== undefined && colMap['condition']) {
+    sheet.getRange(targetRowIdx, colMap['condition']).setValue(rowData.condition);
+  }
+  if (rowData.location !== undefined && colMap['location']) {
+    sheet.getRange(targetRowIdx, colMap['location']).setValue(rowData.location);
+  }
+  if (rowData.calibrationDueDate !== undefined && colMap['calibrationDueDate']) {
+    sheet.getRange(targetRowIdx, colMap['calibrationDueDate']).setValue(rowData.calibrationDueDate);
+  }
+  if (rowData.dueDays !== undefined && colMap['dueDays']) {
+    sheet.getRange(targetRowIdx, colMap['dueDays']).setValue(rowData.dueDays);
+  }
+  if (rowData.remarks !== undefined && colMap['remarks']) {
+    sheet.getRange(targetRowIdx, colMap['remarks']).setValue(rowData.remarks);
+  }
+  if (rowData.description !== undefined && colMap['description']) {
+    sheet.getRange(targetRowIdx, colMap['description']).setValue(rowData.description);
+  }
+  if (rowData.make !== undefined && colMap['make']) {
+    sheet.getRange(targetRowIdx, colMap['make']).setValue(rowData.make);
+  }
+  if (rowData.model !== undefined && colMap['model']) {
+    sheet.getRange(targetRowIdx, colMap['model']).setValue(rowData.model);
+  }
+  if (rowData.serialNo !== undefined && colMap['serialNo']) {
+    sheet.getRange(targetRowIdx, colMap['serialNo']).setValue(rowData.serialNo);
   }
 
-  // Apply Update
-  const newVersion = currentServerVersion + 1;
+  // Update Version / Last Modified if columns exist
   const nowIso = new Date().toISOString();
+  if (colMap['version']) {
+    const curV = Number(sheet.getRange(targetRowIdx, colMap['version']).getValue()) || 1;
+    sheet.getRange(targetRowIdx, colMap['version']).setValue(curV + 1);
+  }
+  if (colMap['lastModified']) {
+    sheet.getRange(targetRowIdx, colMap['lastModified']).setValue(nowIso);
+  }
 
-  const newValues = headers.map(h => {
-    if (h === 'Version') return newVersion;
-    if (h === 'Last Modified') return nowIso;
-    if (h === 'ID') return targetId || ('item_' + (rowData.slno || targetRowIdx));
-    if (h === 'SLNO') return rowData.slno !== undefined ? rowData.slno : rowData.SLNO;
-    if (h === 'Description') return rowData.description !== undefined ? rowData.description : rowData.Description;
-    if (h === 'Make') return rowData.make !== undefined ? rowData.make : rowData.Make;
-    if (h === 'Model') return rowData.model !== undefined ? rowData.model : rowData.Model;
-    if (h === 'Serial No') return rowData.serialNo !== undefined ? rowData.serialNo : rowData['Serial No'];
-    if (h === 'Personal /Common') return rowData.type !== undefined ? rowData.type : rowData['Personal /Common'];
-    if (h === 'condition') return rowData.condition !== undefined ? rowData.condition : rowData.condition;
-    if (h === 'Location/Individual') return rowData.location !== undefined ? rowData.location : rowData['Location/Individual'];
-    if (h === 'Calibration due date') return rowData.calibrationDueDate !== undefined ? rowData.calibrationDueDate : rowData['Calibration due date'];
-    if (h === 'Remarks') return rowData.remarks !== undefined ? rowData.remarks : rowData.Remarks;
-    if (h === 'Due days') return rowData.dueDays !== undefined ? rowData.dueDays : rowData['Due days'];
-    return rowData[h] !== undefined ? rowData[h] : '';
-  });
+  const newV = colMap['version'] ? Number(sheet.getRange(targetRowIdx, colMap['version']).getValue()) : 2;
 
-  sheet.getRange(targetRowIdx, 1, 1, headers.length).setValues([newValues]);
-
-  rowData.version = newVersion;
-  rowData.lastModified = nowIso;
   return {
     success: true,
-    message: 'Row updated successfully',
-    row: rowData,
-    newVersion: newVersion
+    message: 'Row ' + targetRowIdx + ' (SLNO ' + targetSlno + ') updated successfully in Google Sheet.',
+    rowNumber: targetRowIdx,
+    slno: targetSlno,
+    updatedFields: rowData,
+    newVersion: newV,
+    timestamp: nowIso
   };
 }
 
 /**
  * Append single row
  */
-function appendSingleRow(sheet, rowData) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
-  const nowIso = new Date().toISOString();
-  const nextSlno = sheet.getLastRow();
-
-  const rowVals = headers.map(h => {
-    if (h === 'SLNO') return rowData.slno || rowData.SLNO || nextSlno;
-    if (h === 'Version') return 1;
-    if (h === 'Last Modified') return nowIso;
-    if (h === 'ID') return rowData.id || rowData.ID || ('item_' + nextSlno);
-    if (h === 'Description') return rowData.description || rowData.Description || '';
-    if (h === 'Make') return rowData.make || rowData.Make || '';
-    if (h === 'Model') return rowData.model || rowData.Model || '';
-    if (h === 'Serial No') return rowData.serialNo || rowData['Serial No'] || '';
-    if (h === 'Personal /Common') return rowData.type || rowData['Personal /Common'] || 'common';
-    if (h === 'condition') return rowData.condition || 'Good';
-    if (h === 'Location/Individual') return rowData.location || rowData['Location/Individual'] || '';
-    if (h === 'Calibration due date') return rowData.calibrationDueDate || rowData['Calibration due date'] || '';
-    if (h === 'Remarks') return rowData.remarks || rowData.Remarks || '';
-    if (h === 'Due days') return rowData.dueDays !== undefined ? rowData.dueDays : '';
-    return rowData[h] !== undefined ? rowData[h] : '';
-  });
-
-  sheet.appendRow(rowVals);
-  rowData.version = 1;
-  rowData.lastModified = nowIso;
-  rowData.id = rowData.id || ('item_' + nextSlno);
+function appendSingleRowDirect(sheet, rowData) {
+  const lastRow = sheet.getLastRow();
+  const nextSlno = rowData.slno || lastRow;
+  const newRowVals = [
+    nextSlno,
+    rowData.description || '',
+    rowData.make || '',
+    rowData.model || '',
+    rowData.serialNo || '',
+    rowData.type || 'common',
+    rowData.condition || 'Good',
+    rowData.location || 'AD-12',
+    rowData.calibrationDueDate || '',
+    rowData.remarks || '',
+    rowData.dueDays !== undefined ? rowData.dueDays : ''
+  ];
+  sheet.appendRow(newRowVals);
   return rowData;
 }
 
 /**
- * Delete row by ID or SLNO
+ * Delete row by SLNO or ID
  */
-function deleteRowById(sheet, rowId) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => String(h).trim());
-  const idColIdx = headers.indexOf('ID');
-  const slnoColIdx = headers.indexOf('SLNO');
-  const values = sheet.getDataRange().getValues();
-
-  for (let r = 1; r < values.length; r++) {
-    const rId = idColIdx !== -1 ? String(values[r][idColIdx]) : '';
-    const rSlno = slnoColIdx !== -1 ? String(values[r][slnoColIdx]) : '';
-    if ((rId && rId === String(rowId)) || (rSlno && rSlno === String(rowId))) {
-      sheet.deleteRow(r + 1);
-      return true;
+function deleteRowByIdOrSlno(sheet, targetId) {
+  const num = Number(targetId);
+  const lastRow = sheet.getLastRow();
+  if (num > 0) {
+    const colA = sheet.getRange(1, 1, lastRow, 1).getValues();
+    for (let r = 1; r < colA.length; r++) {
+      if (Number(colA[r][0]) === num) {
+        sheet.deleteRow(r + 1);
+        return true;
+      }
     }
   }
   return false;
 }
 
 /**
- * Process queued actions from offline storage
+ * Read sheet data as JSON
  */
-function processOfflineQueueBatch(sheet, queue) {
-  const results = [];
-  for (let i = 0; i < queue.length; i++) {
-    const item = queue[i];
-    try {
-      if (item.type === 'UPDATE' || item.type === 'UPDATE_ROW') {
-        const res = updateRowWithConflictCheck(sheet, item.payload, item.baseVersion, item.forceOverwrite);
-        results.push({ id: item.id, ...res });
-      } else if (item.type === 'ADD' || item.type === 'ADD_ROW') {
-        const added = appendSingleRow(sheet, item.payload);
-        results.push({ id: item.id, success: true, row: added });
-      } else if (item.type === 'DELETE' || item.type === 'DELETE_ROW') {
-        const del = deleteRowById(sheet, item.rowId || item.payload.id);
-        results.push({ id: item.id, success: del });
-      }
-    } catch (e) {
-      results.push({ id: item.id, success: false, error: e.toString() });
-    }
+function getSheetDataAsJson(sheet) {
+  if (!sheet) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    sheet = getTargetSheet(ss, DEFAULT_SHEET_NAME);
   }
-  return results;
-}
 
-/**
- * Ensure standard equipment headers exist in the sheet
- */
-function ensureSheetHeaders(sheet) {
+  const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
-  if (lastCol === 0) {
-    sheet.appendRow(EXPECTED_HEADERS);
-    sheet.getRange(1, 1, 1, EXPECTED_HEADERS.length).setFontWeight('bold').setBackground('#F1F5F9');
-    return;
+  if (lastRow <= 1) return { headers: [], rows: [] };
+
+  const rawHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const fieldMapping = rawHeaders.map(h => normalizeHeader(h));
+  const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const rows = [];
+
+  for (let r = 0; r < values.length; r++) {
+    const rowObj = { id: 'item_' + (r + 1), slno: r + 1, _rowNumber: r + 2 };
+    for (let c = 0; c < fieldMapping.length; c++) {
+      const field = fieldMapping[c];
+      const val = values[r][c];
+      if (field === 'slno') rowObj.slno = Number(val) || (r + 1);
+      else rowObj[field] = val;
+    }
+    if (!rowObj.condition) rowObj.condition = 'Good';
+    rows.push(rowObj);
   }
 
-  const existingHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
-  if (existingHeaders.indexOf('Version') === -1) {
-    sheet.getRange(1, lastCol + 1).setValue('Version');
-  }
-  if (existingHeaders.indexOf('Last Modified') === -1) {
-    sheet.getRange(1, lastCol + 2).setValue('Last Modified');
-  }
-  if (existingHeaders.indexOf('ID') === -1) {
-    sheet.getRange(1, lastCol + 3).setValue('ID');
-  }
+  return { headers: rawHeaders, rows: rows };
 }
 
-/**
- * Backup spreadsheet tab
- */
-function createSheetBackup(ss, sourceSheet, title) {
-  const now = new Date();
-  const dateStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
-  const backupName = BACKUP_PREFIX + dateStr + '_' + (title || 'Snapshot').replace(/[^a-zA-Z0-9]/g, '_');
-  const backupSheet = sourceSheet.copyTo(ss);
-  backupSheet.setName(backupName);
-  backupSheet.setTabColor('#10B981');
-  return backupName;
-}
-
-/**
- * List backups
- */
 function listBackupSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheets = ss.getSheets();
@@ -494,24 +477,6 @@ function listBackupSheets() {
   return backups;
 }
 
-/**
- * Restore spreadsheet from backup tab
- */
-function restoreSheetBackup(ss, backupSheetName) {
-  const backupSheet = ss.getSheetByName(backupSheetName);
-  if (!backupSheet) throw new Error('Backup sheet not found: ' + backupSheetName);
-
-  let activeSheet = ss.getSheetByName(SHEET_NAME);
-  if (activeSheet) {
-    // create safeguard copy first
-    activeSheet.copyTo(ss).setName('Safeguard_' + Date.now());
-    ss.deleteSheet(activeSheet);
-  }
-  const restored = backupSheet.copyTo(ss);
-  restored.setName(SHEET_NAME);
-  ss.setActiveSheet(restored);
-}
-
 function jsonResponse(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
@@ -524,7 +489,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <title>Electrical Team Tools List - SheetSync Pro (IndexedDB Offline)</title>
-  <!-- DataTables CSS & Responsive CDN -->
   <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
   <link rel="stylesheet" href="https://cdn.datatables.net/responsive/2.5.0/css/responsive.dataTables.min.css">
   <script src="https://cdn.tailwindcss.com"></script>
@@ -544,7 +508,7 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
 <body class="bg-slate-100/80 text-slate-900 min-h-screen p-2 sm:p-5">
   <div class="max-w-7xl mx-auto space-y-3">
 
-    <!-- Offline Alert Banner (Shows when offline) -->
+    <!-- Offline Alert Banner -->
     <div id="offlineBanner" class="hidden bg-rose-500 text-white px-4 py-2.5 rounded-2xl text-xs font-semibold flex items-center justify-between shadow-md">
       <div class="flex items-center gap-2">
         <span class="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping"></span>
@@ -557,7 +521,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
     <header class="bg-white p-4 sm:p-5 rounded-2xl shadow-xs border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
       <div>
         <div class="flex items-center gap-2.5">
-          <!-- Real-Time Status Indicator Badge -->
           <div id="statusBadge" class="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
             <span id="statusDot" class="w-2 h-2 rounded-full bg-emerald-500"></span>
             <span id="statusText">Synced with Google Sheet</span>
@@ -578,7 +541,7 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       </div>
     </header>
 
-    <!-- Google Sheets Tab Switcher Bar (Full list, Hand tools, Faulty Tools, Spare tools, Regular Calibration tools) -->
+    <!-- Google Sheets Tab Switcher Bar -->
     <div class="bg-slate-200/90 border border-slate-300 rounded-2xl p-1 flex items-center overflow-x-auto gap-1 text-xs font-semibold select-none shadow-xs">
       <button onclick="switchTab('Full list')" id="tab_all" class="sheet-tab-active px-3.5 py-2 rounded-xl bg-white text-blue-600 shadow-xs flex items-center gap-1.5 shrink-0 transition-all">
         <span>Full list</span> <span class="text-[10px] bg-blue-100 text-blue-800 px-1.5 py-0.2 rounded-full" id="count_all">0</span> ▾
@@ -600,7 +563,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
     <!-- DataTables Table Container -->
     <div class="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-200">
       <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <!-- Quick Filters -->
         <div class="flex flex-wrap items-center gap-2 text-xs">
           <select id="filterCondition" onchange="applyFilters()" class="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-700">
             <option value="">All Conditions</option>
@@ -621,7 +583,7 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
         </div>
 
         <div class="text-xs text-slate-400">
-          Double-click any row to edit • Offline edits auto-saved
+          Double-click any row to edit • Edits auto-sync to Google Sheets
         </div>
       </div>
 
@@ -643,52 +605,18 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
           </tr>
         </thead>
         <tbody>
-          <!-- Loaded from IndexedDB / Google Sheet -->
         </tbody>
       </table>
     </div>
   </div>
 
-  <!-- Conflict Resolution Modal -->
-  <div id="conflictModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-    <div class="bg-white rounded-3xl shadow-2xl border border-slate-200 max-w-xl w-full p-6 space-y-4">
-      <div class="flex items-center gap-3 text-amber-600">
-        <span class="p-2 bg-amber-100 rounded-xl text-lg">⚠️</span>
-        <div>
-          <h3 class="font-bold text-base text-slate-900">Sync Conflict Detected</h3>
-          <p class="text-xs text-slate-500">Another team member modified this row while you were offline.</p>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-2 gap-3 text-xs bg-slate-50 p-3 rounded-2xl border border-slate-200">
-        <div>
-          <p class="font-bold text-indigo-600 mb-1">Your Offline Changes:</p>
-          <div id="conflictClientView" class="space-y-1 font-mono text-[11px] text-slate-600"></div>
-        </div>
-        <div>
-          <p class="font-bold text-emerald-600 mb-1">Google Sheet (Server) Version:</p>
-          <div id="conflictServerView" class="space-y-1 font-mono text-[11px] text-slate-600"></div>
-        </div>
-      </div>
-
-      <div class="flex flex-col sm:flex-row justify-end gap-2 pt-2 text-xs">
-        <button onclick="resolveConflict('SERVER_WINS')" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl">
-          Accept Server Version (Discard Local)
-        </button>
-        <button onclick="resolveConflict('CLIENT_WINS')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-xs">
-          Force My Changes (Client Wins)
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Add / Edit Equipment Modal -->
+  <!-- Edit Modal -->
   <div id="editModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
     <div class="bg-white rounded-3xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 space-y-4">
-      <h3 id="modalTitle" class="font-bold text-base text-slate-900">Edit Equipment</h3>
+      <h3 id="modalTitle" class="font-bold text-base text-slate-900">Edit Tool</h3>
       <form id="equipmentForm" onsubmit="saveEquipment(event)" class="space-y-3 text-xs">
         <input type="hidden" id="editRowId">
-        <input type="hidden" id="editBaseVersion">
+        <input type="hidden" id="editSlno">
 
         <div>
           <label class="block font-bold text-slate-700 mb-1">Description *</label>
@@ -709,11 +637,11 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block font-bold text-slate-700 mb-1">Serial No</label>
-            <input type="text" id="editSerial" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+            <input type="text" id="editSerial" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono">
           </div>
           <div>
             <label class="block font-bold text-slate-700 mb-1">Condition</label>
-            <select id="editCondition" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+            <select id="editCondition" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold">
               <option value="Good">Good</option>
               <option value="Under Repair">Under Repair</option>
               <option value="spare / Emergency">spare / Emergency</option>
@@ -729,7 +657,7 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
           </div>
           <div>
             <label class="block font-bold text-slate-700 mb-1">Calibration Due Date</label>
-            <input type="text" id="editDueDate" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs" placeholder="e.g. 10-Mar-2027">
+            <input type="text" id="editDueDate" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono">
           </div>
         </div>
 
@@ -740,21 +668,19 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
 
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" onclick="closeEditModal()" class="px-4 py-2 text-slate-500 font-semibold hover:text-slate-700">Cancel</button>
-          <button type="submit" class="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-xs">Save Changes</button>
+          <button type="submit" class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl shadow-xs">Save &amp; Sync Sheet</button>
         </div>
       </form>
     </div>
   </div>
 
-  <!-- IndexedDB & DataTables Controller Script -->
   <script>
     let dtTable;
     let db;
     const DB_NAME = 'SheetSync_GAS_DB';
     const DB_VERSION = 1;
-    let currentConflict = null;
+    let currentSheetTab = 'Full list';
 
-    // --- 1. Initialize IndexedDB ---
     function initIndexedDB() {
       return new Promise((resolve, reject) => {
         const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -775,7 +701,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       });
     }
 
-    // --- 2. IndexedDB Operations ---
     function idbGetAll(storeName) {
       return new Promise((resolve) => {
         if (!db) return resolve([]);
@@ -817,7 +742,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       });
     }
 
-    // --- 3. DataTables Initialization ---
     function initTable() {
       dtTable = $('#equipmentTable').DataTable({
         responsive: true,
@@ -857,21 +781,18 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
             data: null,
             orderable: false,
             render: function(data, type, row) {
-              return '<button class="text-indigo-600 hover:underline mr-2 font-medium" onclick="openEditModal(\\'' + row.id + '\\')">Edit</button>' +
+              return '<button class="text-blue-600 hover:underline mr-2 font-medium" onclick="openEditModal(\\'' + row.id + '\\')">Edit</button>' +
                      '<button class="text-rose-600 hover:underline font-medium" onclick="deleteRow(\\'' + row.id + '\\')">Delete</button>';
             }
           }
         ]
       });
 
-      // Double-click row to edit
       $('#equipmentTable tbody').on('dblclick', 'tr', function () {
         const data = dtTable.row(this).data();
         if (data) openEditModal(data.id);
       });
     }
-
-    let currentSheetTab = 'Full list';
 
     function switchTab(tabName) {
       currentSheetTab = tabName;
@@ -931,7 +852,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       dtTable.clear().rows.add(list).draw();
     }
 
-    // --- 4. Load Data (IndexedDB First, Then Remote Sync) ---
     async function loadData() {
       await renderFilteredTable();
       updateQueueUI();
@@ -950,12 +870,11 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
           .withSuccessHandler(async function(res) {
             let data = typeof res === 'string' ? JSON.parse(res) : res;
             if (data && data.rows) {
-              // Cache in IndexedDB
               await idbClear('equipment');
               for (const r of data.rows) {
                 await idbPut('equipment', r);
               }
-              dtTable.clear().rows.add(data.rows).draw();
+              renderFilteredTable();
               setSyncStatus('synced');
             }
           })
@@ -965,73 +884,52 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
           })
           .getSheetDataAsJson();
       } else {
-        // Fallback for direct testing
         setSyncStatus('synced');
       }
     }
 
-    // --- 5. Offline Queue Processing & Conflict Handling ---
     async function triggerSync() {
       if (!navigator.onLine) {
-        alert('You are currently offline. Edits are safely stored in IndexedDB.');
+        alert('You are currently offline. Edits are cached in IndexedDB.');
         return;
       }
-
       setSyncStatus('syncing');
       const queue = await idbGetAll('offline_queue');
 
-      if (queue.length === 0) {
-        fetchFromSheet();
-        return;
-      }
-
-      // Process queued actions in sequence
       for (const item of queue) {
         if (typeof google !== 'undefined' && google.script && google.script.run) {
           await new Promise((res) => {
             google.script.run
-              .withSuccessHandler(async function(resp) {
-                if (resp && resp.conflict) {
-                  // Conflict Detected! Prompt user
-                  currentConflict = { item: item, serverRow: resp.serverRow, clientRow: resp.clientRow };
-                  showConflictModal(resp.clientRow, resp.serverRow);
-                } else {
-                  await idbDelete('offline_queue', item.id);
-                }
+              .withSuccessHandler(async function() {
+                await idbDelete('offline_queue', item.id);
                 res();
               })
               .withFailureHandler(function(err) {
-                console.error('Queue item error', err);
+                console.error(err);
                 res();
               })
-              .syncOfflineItem(item);
+              .updateEquipmentRowDirect(null, item.payload);
           });
         }
       }
-
       updateQueueUI();
       fetchFromSheet();
     }
 
-    // --- 6. Save / Edit Logic with Offline Fallback ---
     async function saveEquipment(e) {
       e.preventDefault();
       const id = document.getElementById('editRowId').value;
-      const baseVersion = Number(document.getElementById('editBaseVersion').value) || 1;
+      const slno = Number(document.getElementById('editSlno').value) || 1;
 
       const cached = await idbGetAll('equipment');
       let row = cached.find(r => r.id === id);
 
       const isNew = !row;
       if (isNew) {
-        row = {
-          id: 'item_' + Date.now(),
-          slno: cached.length + 1,
-          version: 1,
-          lastModified: new Date().toISOString()
-        };
+        row = { id: 'item_' + Date.now(), slno: cached.length + 1 };
       }
 
+      row.slno = slno;
       row.description = document.getElementById('editDesc').value;
       row.make = document.getElementById('editMake').value;
       row.model = document.getElementById('editModel').value;
@@ -1040,58 +938,33 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       row.location = document.getElementById('editLocation').value;
       row.calibrationDueDate = document.getElementById('editDueDate').value;
       row.remarks = document.getElementById('editRemarks').value;
-      row.lastModified = new Date().toISOString();
 
-      // 1. Immediately update IndexedDB
       await idbPut('equipment', row);
 
-      // 2. Queue into offline_queue
       const queueItem = {
         id: 'q_' + Date.now(),
         type: isNew ? 'ADD' : 'UPDATE',
-        rowId: row.id,
-        payload: row,
-        baseVersion: baseVersion,
-        timestamp: new Date().toISOString()
+        payload: row
       };
       await idbPut('offline_queue', queueItem);
 
-      // 3. Update Table UI Optimistically
-      const rows = await idbGetAll('equipment');
-      dtTable.clear().rows.add(rows).draw();
+      renderFilteredTable();
       closeEditModal();
       updateQueueUI();
 
-      // 4. If online, trigger background sync
       if (navigator.onLine) {
         triggerSync();
       }
     }
 
-    async function deleteRow(id) {
-      if (!confirm('Are you sure you want to delete this equipment item?')) return;
-      await idbDelete('equipment', id);
-      await idbPut('offline_queue', {
-        id: 'q_' + Date.now(),
-        type: 'DELETE',
-        rowId: id,
-        timestamp: new Date().toISOString()
-      });
-      const rows = await idbGetAll('equipment');
-      dtTable.clear().rows.add(rows).draw();
-      updateQueueUI();
-      if (navigator.onLine) triggerSync();
-    }
-
-    // --- 7. Modal Handlers ---
     async function openEditModal(id) {
       const cached = await idbGetAll('equipment');
       const row = cached.find(r => r.id === id);
       if (!row) return;
 
-      document.getElementById('modalTitle').textContent = 'Edit Equipment #' + row.slno;
+      document.getElementById('modalTitle').textContent = 'Edit Tool #' + row.slno;
       document.getElementById('editRowId').value = row.id;
-      document.getElementById('editBaseVersion').value = row.version || 1;
+      document.getElementById('editSlno').value = row.slno;
       document.getElementById('editDesc').value = row.description || '';
       document.getElementById('editMake').value = row.make || '';
       document.getElementById('editModel').value = row.model || '';
@@ -1105,10 +978,10 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
     }
 
     function openAddModal() {
-      document.getElementById('modalTitle').textContent = 'Add New Equipment';
+      document.getElementById('modalTitle').textContent = 'Add New Tool';
       document.getElementById('equipmentForm').reset();
       document.getElementById('editRowId').value = '';
-      document.getElementById('editBaseVersion').value = '1';
+      document.getElementById('editSlno').value = '';
       document.getElementById('editModal').classList.remove('hidden');
     }
 
@@ -1116,39 +989,12 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       document.getElementById('editModal').classList.add('hidden');
     }
 
-    // --- 8. Conflict Resolution Dialog ---
-    function showConflictModal(client, server) {
-      document.getElementById('conflictClientView').innerHTML =
-        '<p>Desc: ' + (client.description || '') + '</p>' +
-        '<p>Cond: ' + (client.condition || '') + '</p>' +
-        '<p>Location: ' + (client.location || '') + '</p>';
-
-      document.getElementById('conflictServerView').innerHTML =
-        '<p>Desc: ' + (server.Description || '') + '</p>' +
-        '<p>Cond: ' + (server.condition || '') + '</p>' +
-        '<p>Location: ' + (server['Location/Individual'] || '') + '</p>';
-
-      document.getElementById('conflictModal').classList.remove('hidden');
+    async function deleteRow(id) {
+      if (!confirm('Delete this equipment row?')) return;
+      await idbDelete('equipment', id);
+      renderFilteredTable();
     }
 
-    async function resolveConflict(strategy) {
-      if (!currentConflict) return;
-      document.getElementById('conflictModal').classList.add('hidden');
-
-      if (strategy === 'CLIENT_WINS') {
-        // Force client version
-        currentConflict.item.forceOverwrite = true;
-        await idbPut('offline_queue', currentConflict.item);
-        triggerSync();
-      } else {
-        // Server wins: remove from queue and refresh from sheet
-        await idbDelete('offline_queue', currentConflict.item.id);
-        fetchFromSheet();
-      }
-      currentConflict = null;
-    }
-
-    // --- 9. UI Status Helpers ---
     function setSyncStatus(st) {
       const badge = document.getElementById('statusBadge');
       const dot = document.getElementById('statusDot');
@@ -1165,7 +1011,7 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       } else if (st === 'error') {
         badge.className = 'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200';
         dot.className = 'w-2 h-2 rounded-full bg-rose-600';
-        text.textContent = 'Sync Error (Click Sync Now)';
+        text.textContent = 'Sync Error';
       } else {
         badge.className = 'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200';
         dot.className = 'w-2 h-2 rounded-full bg-emerald-500';
@@ -1199,7 +1045,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       dtTable.column(6).search(cond).column(2).search(make).draw();
     }
 
-    // --- 10. Online / Offline Event Listeners ---
     window.addEventListener('online', () => {
       updateQueueUI();
       triggerSync();
@@ -1209,7 +1054,6 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
       updateQueueUI();
     });
 
-    // Start App
     $(document).ready(async function() {
       await initIndexedDB();
       initTable();

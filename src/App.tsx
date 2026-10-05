@@ -138,24 +138,30 @@ export default function App() {
 
   // Mutations
   const handleUpdateRow = (updatedRow: SheetRow) => {
-    const newRows = rows.map((r) => (r.id === updatedRow.id ? updatedRow : r));
+    const rowToSave: SheetRow = {
+      ...updatedRow,
+      lastModified: new Date().toISOString(),
+      lastModifiedBy: 'You',
+      syncStatus: 'pending',
+    };
+    const newRows = rows.map((r) => (r.id === updatedRow.id ? rowToSave : r));
     setRows(newRows);
     storageService.saveRows(newRows);
 
     storageService.enqueueAction({
       type: 'UPDATE_ROW',
-      payload: updatedRow,
-      baseVersion: updatedRow.version || 1,
+      payload: rowToSave,
+      baseVersion: rowToSave.version || 1,
     });
 
-    if (updatedRow.condition === 'Faulty') {
+    if (rowToSave.condition === 'Faulty') {
       storageService.createAlert({
         level: 'critical',
         type: 'status_change',
         title: 'Equipment Faulty Alert',
-        message: `${updatedRow.description} (${updatedRow.make} ${updatedRow.model}) was marked as FAULTY.`,
-        rowId: updatedRow.id,
-        rowName: updatedRow.description,
+        message: `${rowToSave.description} (${rowToSave.make} ${rowToSave.model}) was marked as FAULTY.`,
+        rowId: rowToSave.id,
+        rowName: rowToSave.description,
       });
     }
 
@@ -164,13 +170,19 @@ export default function App() {
 
   const handleAddRow = (newRow: SheetRow, isNew: boolean) => {
     if (isNew) {
-      const newRows = [newRow, ...rows];
+      const rowToSave: SheetRow = {
+        ...newRow,
+        lastModified: new Date().toISOString(),
+        lastModifiedBy: 'You',
+        syncStatus: 'pending',
+      };
+      const newRows = [rowToSave, ...rows];
       setRows(newRows);
       storageService.saveRows(newRows);
 
       storageService.enqueueAction({
         type: 'ADD_ROW',
-        payload: newRow,
+        payload: rowToSave,
         baseVersion: 1,
       });
 
@@ -178,9 +190,9 @@ export default function App() {
         level: 'info',
         type: 'sync',
         title: 'New Equipment Added',
-        message: `Added ${newRow.description} (${newRow.make} ${newRow.model}) to inventory.`,
-        rowId: newRow.id,
-        rowName: newRow.description,
+        message: `Added ${rowToSave.description} (${rowToSave.make} ${rowToSave.model}) to inventory.`,
+        rowId: rowToSave.id,
+        rowName: rowToSave.description,
       });
     } else {
       handleUpdateRow(newRow);
@@ -197,7 +209,7 @@ export default function App() {
 
     storageService.enqueueAction({
       type: 'DELETE_ROW',
-      payload: { id },
+      payload: { id, slno: target?.slno },
     });
 
     if (target) {
