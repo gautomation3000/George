@@ -80,66 +80,86 @@ export default function App() {
     };
   }, []);
 
-  // Filter rows based on active Google Sheet tab
+  // Filter rows based on active Google Sheet tab with sequential sheet numbering
   const tabFilteredRows = useMemo(() => {
+    let result: SheetRow[] = [];
     if (activeSheetTab === 'Full list') {
-      return rows;
-    }
-
-    if (activeSheetTab === 'Hand tools') {
-      return rows.filter((r) => {
+      result = rows;
+    } else if (activeSheetTab === 'Hand tools') {
+      result = rows.filter((r) => {
         const desc = (r.description || '').toLowerCase();
+        const make = (r.make || '').toLowerCase();
         return (
           desc.includes('clamp') ||
-          desc.includes('meter') ||
           desc.includes('multimeter') ||
           desc.includes('multi meter') ||
+          desc.includes('meter') ||
           desc.includes('camera') ||
           desc.includes('thermo') ||
-          desc.includes('tester') ||
-          desc.includes('calibrator')
+          desc.includes('detector') ||
+          (desc.includes('tester') &&
+            !desc.includes('battery') &&
+            !desc.includes('load bank') &&
+            !desc.includes('injection')) ||
+          make === 'fluke'
         );
       });
-    }
-
-    if (activeSheetTab === 'Faulty Tools') {
-      return rows.filter((r) => {
+    } else if (activeSheetTab === 'Faulty Tools') {
+      result = rows.filter((r) => {
         const cond = (r.condition || '').toLowerCase();
         const rem = (r.remarks || '').toLowerCase();
-        return cond === 'faulty' || rem.includes('defective') || rem.includes('faulty');
+        return cond.includes('faulty') || rem.includes('defective') || rem.includes('faulty');
       });
-    }
-
-    if (activeSheetTab === 'Spare tools') {
-      return rows.filter((r) => {
+    } else if (activeSheetTab === 'Spare tools') {
+      result = rows.filter((r) => {
         const cond = (r.condition || '').toLowerCase();
-        return cond.includes('spare') || cond.includes('emergency');
+        const rem = (r.remarks || '').toLowerCase();
+        return cond.includes('spare') || cond.includes('emergency') || rem.includes('emergency');
       });
-    }
-
-    if (activeSheetTab === 'Regular Calibration tools') {
-      return rows.filter((r) => {
+    } else if (activeSheetTab === 'Regular Calibration tools') {
+      result = rows.filter((r) => {
         const desc = (r.description || '').toLowerCase();
         return (
-          desc.includes('injection kit') ||
+          desc.includes('injection') ||
           desc.includes('high voltage') ||
           desc.includes('load bank') ||
           desc.includes('ohm meter') ||
+          desc.includes('micro ohm') ||
           desc.includes('earth tester') ||
           desc.includes('power quality') ||
           desc.includes('partial discharge') ||
-          desc.includes('battery')
+          desc.includes('battery') ||
+          desc.includes('calibrat')
         );
       });
+    } else {
+      result = rows;
     }
 
-    return rows;
+    // Assign sequential sheetSlno (1, 2, 3...) for accurate sheet indexing while preserving original SLNO and Serial No
+    return result.map((r, index) => ({
+      ...r,
+      sheetSlno: index + 1,
+    }));
   }, [rows, activeSheetTab]);
 
   // Mutations
   const handleUpdateRow = (updatedRow: SheetRow) => {
+    const existing = rows.find((r) => r.id === updatedRow.id);
     const rowToSave: SheetRow = {
+      ...(existing || {}),
       ...updatedRow,
+      // Protect Model, Serial No, Description, and Make from ever becoming empty
+      model:
+        updatedRow.model !== undefined && updatedRow.model !== ''
+          ? updatedRow.model
+          : existing?.model || '',
+      serialNo:
+        updatedRow.serialNo !== undefined && updatedRow.serialNo !== ''
+          ? updatedRow.serialNo
+          : existing?.serialNo || '',
+      description: updatedRow.description || existing?.description || 'Equipment Item',
+      make: updatedRow.make || existing?.make || '',
       lastModified: new Date().toISOString(),
       lastModifiedBy: 'You',
       syncStatus: 'pending',
@@ -150,7 +170,10 @@ export default function App() {
 
     storageService.enqueueAction({
       type: 'UPDATE_ROW',
-      payload: rowToSave,
+      payload: {
+        ...rowToSave,
+        sheetName: activeSheetTab,
+      },
       baseVersion: rowToSave.version || 1,
     });
 
@@ -405,6 +428,7 @@ export default function App() {
         {activeView === 'table' ? (
           <DataTableView
             rows={tabFilteredRows}
+            activeSheetTab={activeSheetTab}
             onUpdateRow={handleUpdateRow}
             onDeleteRow={handleDeleteRow}
             onDuplicateRow={handleDuplicateRow}
@@ -420,6 +444,7 @@ export default function App() {
         ) : (
           <MobileCardView
             rows={tabFilteredRows}
+            activeSheetTab={activeSheetTab}
             onUpdateRow={handleUpdateRow}
             onDeleteRow={handleDeleteRow}
             onDuplicateRow={handleDuplicateRow}

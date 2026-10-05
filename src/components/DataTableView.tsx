@@ -29,6 +29,7 @@ import { ExcelService } from '../services/excelService';
 
 interface Props {
   rows: SheetRow[];
+  activeSheetTab?: string;
   onUpdateRow: (row: SheetRow) => void;
   onDeleteRow: (id: string) => void;
   onDuplicateRow: (row: SheetRow) => void;
@@ -41,6 +42,7 @@ interface Props {
 
 export const DataTableView: React.FC<Props> = ({
   rows,
+  activeSheetTab = 'Full list',
   onUpdateRow,
   onDeleteRow,
   onDuplicateRow,
@@ -430,9 +432,9 @@ export const DataTableView: React.FC<Props> = ({
                 </th>
 
                 {visibleColumns.slno && (
-                  <th onClick={() => handleSort('slno')} className="py-3 px-3 w-14 cursor-pointer group">
+                  <th onClick={() => handleSort('slno')} className="py-3 px-3 min-w-[75px] cursor-pointer group">
                     <div className="flex items-center gap-1">
-                      <span>SLNO</span>
+                      <span>{activeSheetTab !== 'Full list' ? 'S.No' : 'SLNO'}</span>
                       {getSortIcon('slno')}
                     </div>
                   </th>
@@ -570,8 +572,20 @@ export const DataTableView: React.FC<Props> = ({
 
                       {/* SLNO */}
                       {visibleColumns.slno && (
-                        <td className={`${cellPadding} font-mono text-slate-400 font-semibold`}>
-                          {row.slno}
+                        <td className={`${cellPadding} font-mono font-semibold`}>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-800 dark:text-slate-200">
+                              {row.sheetSlno ?? row.slno}
+                            </span>
+                            {activeSheetTab !== 'Full list' && (
+                              <span
+                                className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono font-normal"
+                                title={`Full list S.No: #${row.slno}`}
+                              >
+                                #{row.slno}
+                              </span>
+                            )}
+                          </div>
                         </td>
                       )}
 
@@ -619,15 +633,23 @@ export const DataTableView: React.FC<Props> = ({
 
                       {/* Model */}
                       {visibleColumns.model && (
-                        <td className={`${cellPadding} font-mono text-xs text-slate-600 dark:text-slate-400`}>
-                          {row.model}
+                        <td className={`${cellPadding} font-mono text-xs text-slate-700 dark:text-slate-300`}>
+                          {row.model ? (
+                            <span>{row.model}</span>
+                          ) : (
+                            <span className="text-slate-300 dark:text-slate-600">—</span>
+                          )}
                         </td>
                       )}
 
                       {/* Serial No */}
                       {visibleColumns.serialNo && (
-                        <td className={`${cellPadding} font-mono text-xs text-slate-500`}>
-                          {row.serialNo}
+                        <td className={`${cellPadding} font-mono text-xs font-semibold text-slate-800 dark:text-slate-200`}>
+                          {row.serialNo ? (
+                            <span>{row.serialNo}</span>
+                          ) : (
+                            <span className="text-slate-300 dark:text-slate-600 font-normal">—</span>
+                          )}
                         </td>
                       )}
 

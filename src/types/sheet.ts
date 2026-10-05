@@ -5,6 +5,7 @@ export type SheetTabName = 'Full list' | 'Hand tools' | 'Faulty Tools' | 'Spare 
 export interface SheetRow {
   id: string;
   slno: number;
+  sheetSlno?: number; // Sequential index within active sheet tab (1, 2, 3...)
   description: string;
   make: string;
   model: string;

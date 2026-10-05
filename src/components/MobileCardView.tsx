@@ -13,6 +13,7 @@ import {
 
 interface Props {
   rows: SheetRow[];
+  activeSheetTab?: string;
   onUpdateRow: (row: SheetRow) => void;
   onDeleteRow: (id: string) => void;
   onDuplicateRow: (row: SheetRow) => void;
@@ -21,6 +22,7 @@ interface Props {
 
 export const MobileCardView: React.FC<Props> = ({
   rows,
+  activeSheetTab = 'Full list',
   onUpdateRow,
   onDeleteRow,
   onDuplicateRow,
@@ -63,10 +65,17 @@ export const MobileCardView: React.FC<Props> = ({
               {/* Header: SLNO, Make, Condition */}
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] font-mono text-slate-400 font-bold">#{row.slno}</span>
+                  <span className="text-[11px] font-mono text-slate-500 font-bold">
+                    #{row.sheetSlno ?? row.slno}
+                  </span>
+                  {activeSheetTab !== 'Full list' && (
+                    <span className="text-[10px] font-mono text-slate-400">
+                      (Full: #{row.slno})
+                    </span>
+                  )}
                   <span className="font-bold text-xs text-indigo-600 dark:text-indigo-400">{row.make}</span>
                   {row.model && (
-                    <span className="text-xs text-slate-500 font-mono">({row.model})</span>
+                    <span className="text-xs text-slate-600 dark:text-slate-300 font-mono">({row.model})</span>
                   )}
                 </div>
 
